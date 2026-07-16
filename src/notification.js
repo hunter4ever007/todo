@@ -2,15 +2,16 @@ import { loadTasks } from './store.js'
 import { log } from './logger.js'
 
 const FIRED_KEY = 'todo:notified'
-const timers = new Map()
+const pageTimers = new Map()
 let ready = false
+let usingSW = false
 
 function getFired() {
   try { return JSON.parse(localStorage.getItem(FIRED_KEY) || '[]') }
   catch { return [] }
 }
 
-function markFired(id) {
+function setFired(id) {
   const ids = getFired()
   if (!ids.includes(id)) {
     ids.push(id)
@@ -41,9 +42,9 @@ function playBeep() {
   }
 }
 
-function fireNow(task) {
+function notify(task) {
   playBeep()
-  markFired(task.id)
+  setFired(task.id)
   try {
     if ('Notification' in window && Notification.permission === 'granted') {
       navigator.serviceWorker?.ready?.then(reg => {
@@ -59,7 +60,6 @@ function fireNow(task) {
         new Notification('🔔 Todo Reminder', {
           body: task.title,
           tag: task.id,
-          data: { id: task.id },
           icon: getBase() + 'icons/icon-192.svg'
         })
       })
@@ -70,30 +70,50 @@ function fireNow(task) {
   log('INFO', 'Fired reminder for', task.id)
 }
 
-function scheduleTask(task) {
-  if (task.done || !task.reminder || !task.date || !task.time) return
-  const fired = getFired()
-  if (fired.includes(task.id)) return
-  const target = new Date(task.date + 'T' + task.time)
-  const now = Date.now()
-  const delay = target.getTime() - now
-  if (delay < -2000) {
-    if (Math.abs(delay) < 3600000) {
-      fireNow(task)
-    }
-    return
-  }
-  if (timers.has(task.id)) clearTimeout(timers.get(task.id))
-  const id = setTimeout(() => fireNow(task), Math.max(delay, 0))
-  timers.set(task.id, id)
+function schedulePageTimer(task) {
+  if (pageTimers.has(task.id)) clearTimeout(pageTimers.get(task.id))
+  const target = new Date(task.date + 'T' + task.time).getTime()
+  const delay = target - Date.now()
+  if (delay < -60000) return
+  if (delay < 0) { notify(task); return }
+  const id = setTimeout(() => notify(task), delay)
+  pageTimers.set(task.id, id)
 }
 
-function scheduleAll() {
-  for (const [id, t] of timers) { clearTimeout(t) }
-  timers.clear()
-  const tasks = loadTasks()
-  for (const task of tasks) {
-    scheduleTask(task)
+function clearPageTimers() {
+  for (const [, t] of pageTimers) clearTimeout(t)
+  pageTimers.clear()
+}
+
+async function sendToSW(tasks) {
+  try {
+    const reg = await navigator.serviceWorker.ready
+    reg.active?.postMessage({ type: 'RESCHEDULE_ALL', tasks })
+    return true
+  } catch { return false }
+}
+
+function getPendingTasks() {
+  const fired = getFired()
+  return loadTasks().filter(t => {
+    if (t.done || !t.reminder || !t.date || !t.time) return false
+    if (fired.includes(t.id)) return false
+    return true
+  })
+}
+
+export async function reschedule() {
+  if (!ready) return
+  clearPageTimers()
+  const pending = getPendingTasks()
+  if (pending.length === 0) return
+  const ok = await sendToSW(pending)
+  usingSW = ok
+  if (!ok) {
+    log('INFO', 'SW unavailable, using page timers')
+    for (const task of pending) schedulePageTimer(task)
+  } else {
+    log('INFO', `Scheduled ${pending.length} reminders via SW`)
   }
 }
 
@@ -104,23 +124,19 @@ export function requestPermission() {
   Notification.requestPermission().then(r => log('INFO', 'Notification permission:', r))
 }
 
-export function reschedule() {
-  if (ready) scheduleAll()
-}
-
 export function start() {
   if (!('Notification' in window)) { log('WARN', 'Notifications not supported'); return }
   ready = true
   requestPermission()
-  scheduleAll()
+  reschedule()
   document.addEventListener('visibilitychange', () => {
-    if (!document.hidden) { scheduleAll(); requestPermission() }
+    if (!document.hidden) { reschedule(); requestPermission() }
   })
   log('INFO', 'Notification scheduler started')
 }
 
 export function stop() {
-  for (const [id, t] of timers) { clearTimeout(t) }
-  timers.clear()
+  clearPageTimers()
+  usingSW = false
   ready = false
 }

@@ -21,9 +21,9 @@ export default defineConfig({
           { src: 'icons/icon-512.svg', sizes: '512x512', type: 'image/svg+xml' }
         ]
       },
-      workbox: {
-        globPatterns: ['**/*.{js,css,html,svg}']
-      }
+      strategies: 'injectManifest',
+      srcDir: 'src',
+      filename: 'sw.js'
     })
   ]
 })
