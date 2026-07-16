@@ -1,7 +1,10 @@
 import { loadTasks } from './store.js'
+import { WORKER_URL } from './config.js'
 import { log } from './logger.js'
 
 const FIRED_KEY = 'todo:notified'
+const SUB_KEY = 'todo:push-endpoint'
+let pushSubscription = null
 
 function getFired() {
   try { return JSON.parse(localStorage.getItem(FIRED_KEY) || '[]') }
@@ -39,9 +42,7 @@ function playBeep() {
   }
 }
 
-function notifyPage(task) {
-  playBeep()
-  markFired(task.id)
+function showNotification(task) {
   try {
     if ('Notification' in window && Notification.permission === 'granted') {
       navigator.serviceWorker?.ready?.then(reg => {
@@ -55,8 +56,7 @@ function notifyPage(task) {
         })
       }).catch(() => {
         new Notification('🔔 Todo Reminder', {
-          body: task.title,
-          tag: task.id,
+          body: task.title, tag: task.id,
           icon: getBase() + 'icons/icon-192.svg'
         })
       })
@@ -64,7 +64,6 @@ function notifyPage(task) {
   } catch (e) {
     log('ERROR', 'Notification failed', e)
   }
-  log('INFO', 'Fired reminder for', task.id)
 }
 
 function getPendingTasks() {
@@ -76,44 +75,97 @@ function getPendingTasks() {
   })
 }
 
-async function syncFiredFromSW() {
-  try {
-    const reg = await navigator.serviceWorker.ready
-    const ids = await new Promise((resolve) => {
-      const channel = new MessageChannel()
-      channel.port1.onmessage = (e) => resolve(e.data?.ids || [])
-      reg.active?.postMessage({ type: 'GET_FIRED' }, [channel.port2])
-      setTimeout(() => resolve([]), 1000)
-    })
-    for (const id of ids) markFired(id)
-  } catch {}
-}
+// ─── API calls to CF Worker ─────────────────────────────────────────────────
 
-async function sendToSW(tasks) {
+async function api(path, body) {
   try {
-    const reg = await navigator.serviceWorker.ready
-    reg.active?.postMessage({ type: 'RESCHEDULE_ALL', tasks })
-    return true
-  } catch { return false }
-}
-
-async function refresh() {
-  await syncFiredFromSW()
-  const pending = getPendingTasks()
-  if (pending.length === 0) return
-  const ok = await sendToSW(pending)
-  log('INFO', ok ? `Sent ${pending.length} reminders to SW` : 'SW unavailable')
-  if (!ok) {
-    log('INFO', 'Falling back to page timers')
-    for (const task of pending) {
-      const target = new Date(task.date + 'T' + task.time).getTime()
-      const delay = target - Date.now()
-      if (delay < -60000) continue
-      if (delay < 0) { notifyPage(task); continue }
-      setTimeout(() => notifyPage(task), delay)
-    }
+    const opts = { headers: { 'Content-Type': 'application/json' } }
+    if (body !== undefined) { opts.method = 'POST'; opts.body = JSON.stringify(body) }
+    const res = await fetch(`${WORKER_URL}${path}`, opts)
+    return res.ok ? res.json() : null
+  } catch (e) {
+    log('WARN', `API ${path} failed`, e)
+    return null
   }
 }
+
+async function fetchPublicKey() {
+  const data = await api('/api/init')
+  if (data && data.publicKey) return data.publicKey
+  return null
+}
+
+async function sendSubscribe() {
+  if (!pushSubscription) return
+  const sub = {
+    endpoint: pushSubscription.endpoint,
+    keys: pushSubscription.toJSON().keys
+  }
+  await api('/api/subscribe', { subscription: sub })
+}
+
+async function sendSchedule(task) {
+  if (!pushSubscription) return
+  await api('/api/schedule', {
+    task: { id: task.id, title: task.title, date: task.date, time: task.time },
+    endpoint: pushSubscription.endpoint
+  })
+}
+
+async function sendCancel(id) {
+  await api('/api/cancel', { id })
+}
+
+// ─── Push subscription ───────────────────────────────────────────────────────
+
+async function subscribeToPush(reg) {
+  if (!('PushManager' in window)) { log('WARN', 'Push not supported'); return null }
+  if (Notification.permission === 'denied') return null
+
+  try {
+    let sub = await reg.pushManager.getSubscription()
+
+    if (!sub) {
+      const pubKeyB64 = await fetchPublicKey()
+      if (!pubKeyB64) { log('WARN', 'Failed to get VAPID key from worker'); return null }
+
+      const appKey = b642ab(pubKeyB64)
+      sub = await reg.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: appKey
+      })
+      log('INFO', 'Push subscribed')
+    }
+
+    localStorage.setItem(SUB_KEY, sub.endpoint)
+    return sub
+  } catch (e) {
+    log('ERROR', 'Push subscribe failed', e)
+    return null
+  }
+}
+
+// ─── Reschedule: send all pending to worker ──────────────────────────────────
+
+export async function reschedule() {
+  if (!pushSubscription) { log('WARN', 'reschedule: no push subscription'); return }
+  const pending = getPendingTasks()
+
+  // Send all pending tasks to worker
+  for (const task of pending) {
+    await sendSchedule(task)
+  }
+
+  // Also send to local SW (fallback)
+  try {
+    const reg = await navigator.serviceWorker.ready
+    reg.active?.postMessage({ type: 'RESCHEDULE_ALL', tasks: pending })
+  } catch {}
+
+  log('INFO', `Scheduled ${pending.length} reminders via worker`)
+}
+
+// ─── Public API ──────────────────────────────────────────────────────────────
 
 export function requestPermission() {
   if (!('Notification' in window)) return
@@ -122,18 +174,55 @@ export function requestPermission() {
   Notification.requestPermission().then(r => log('INFO', 'Notification permission:', r))
 }
 
-export function reschedule() {
-  refresh()
+export async function start() {
+  if (!('Notification' in window) && !('PushManager' in window)) {
+    log('WARN', 'Notifications not supported'); return
+  }
+
+  requestPermission()
+
+  try {
+    const reg = await navigator.serviceWorker.ready
+    pushSubscription = await subscribeToPush(reg)
+    if (pushSubscription) {
+      await sendSubscribe()
+      await reschedule()
+    }
+  } catch (e) {
+    log('ERROR', 'Notification init failed', e)
+  }
+
+  // Listen for SW messages (push received)
+  navigator.serviceWorker.addEventListener('message', (event) => {
+    if (event.data?.type === 'REMINDER_FIRED') {
+      playBeep()
+      for (const task of (event.data.tasks || [])) {
+        markFired(task.id)
+        if (document.hidden) showNotification(task)
+      }
+    }
+  })
+
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) requestPermission()
+  })
+
+  log('INFO', 'Notification system started (CF Worker push)')
 }
 
-export function start() {
-  if (!('Notification' in window)) { log('WARN', 'Notifications not supported'); return }
-  requestPermission()
-  refresh()
-  document.addEventListener('visibilitychange', () => {
-    if (!document.hidden) { refresh(); requestPermission() }
-  })
-  log('INFO', 'Notification scheduler started (SW polling)')
+export function onTaskAdded(task) {
+  if (!pushSubscription) return
+  if (task.reminder && task.date && task.time) {
+    sendSchedule(task)
+  } else {
+    sendCancel(task.id)
+  }
+}
+
+export function init() { start() }
+
+export function onTaskRemoved(id) {
+  sendCancel(id)
 }
 
 export function stop() {
@@ -142,4 +231,15 @@ export function stop() {
       reg.active?.postMessage({ type: 'CLEAR_ALL' })
     })
   } catch {}
+}
+
+// ─── Utility: base64url to Uint8Array ────────────────────────────────────────
+
+function b642ab(str) {
+  str = str.replace(/-/g, '+').replace(/_/g, '/')
+  while (str.length % 4) str += '='
+  const binary = atob(str)
+  const bytes = new Uint8Array(binary.length)
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+  return bytes
 }

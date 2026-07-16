@@ -1,0 +1,12 @@
+name = "todo-push"
+main = "worker.js"
+compatibility_date = "2025-01-01"
+compatibility_flags = ["nodejs_compat"]
+
+[[kv_namespaces]]
+binding = "KV_SCHEDULES"
+id = "eb1303e213bd489a80639e9635ec6445"
+preview_id = "eb1303e213bd489a80639e9635ec6445"
+
+[triggers]
+crons = ["* * * * *"]

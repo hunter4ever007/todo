@@ -1,5 +1,5 @@
 import { loadTasks, addTask, updateTask, toggleTask, deleteTask } from './store.js'
-import { requestPermission, reschedule } from './notification.js'
+import { requestPermission, reschedule, onTaskAdded, onTaskRemoved } from './notification.js'
 import { log } from './logger.js'
 
 let appEl
@@ -107,8 +107,14 @@ function onFormSubmit(e) {
   }
   if (editId) {
     updateTask(editId, data)
+    onTaskRemoved(editId)
+    const tasks = loadTasks()
+    const task = tasks.find(t => t.id === editId)
+    if (task) onTaskAdded(task)
   } else {
-    addTask(data)
+    const tasks = addTask(data)
+    const task = tasks[tasks.length - 1]
+    if (task) onTaskAdded(task)
   }
   closeModal()
   renderList()
@@ -129,7 +135,7 @@ function onClick(e) {
   const overlay = e.target.closest('.modal-overlay')
 
   if (toggle) { toggleTask(toggle.dataset.toggle); renderList(); reschedule() }
-  if (del) { deleteTask(del.dataset.delete); renderList(); reschedule() }
+  if (del) { deleteTask(del.dataset.delete); renderList(); reschedule(); onTaskRemoved(del.dataset.delete) }
   if (themeBtn) toggleTheme()
   if (edit) {
     const tasks = loadTasks()

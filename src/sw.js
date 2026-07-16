@@ -1,6 +1,51 @@
 import { precacheAndRoute } from 'workbox-precaching'
+import { WORKER_URL } from './config.js'
 
 precacheAndRoute(self.__WB_MANIFEST)
+
+// ─── Push event: receives notification from CF Worker ────────────────────────
+
+self.addEventListener('push', (event) => {
+  event.waitUntil(handlePush(event))
+})
+
+async function handlePush() {
+  const reg = self.registration
+  const sub = await reg.pushManager.getSubscription()
+  if (!sub) return
+
+  const tasks = await fetchDueTasks(sub.endpoint)
+  for (const task of tasks) {
+    reg.showNotification('🔔 Todo Reminder', {
+      body: task.title,
+      tag: task.id,
+      data: { id: task.id, url: reg.scope },
+      icon: (reg.scope || '/') + 'icons/icon-192.svg',
+      vibrate: [200, 100, 200],
+      requireInteraction: true
+    })
+  }
+
+  const clients = await self.clients.matchAll({ type: 'window' })
+  for (const client of clients) {
+    client.postMessage({ type: 'REMINDER_FIRED', tasks })
+  }
+}
+
+async function fetchDueTasks(endpoint) {
+  try {
+    const res = await fetch(`${WORKER_URL}/api/due`, {
+      headers: { 'x-push-endpoint': endpoint }
+    })
+    if (!res.ok) return []
+    const data = await res.json()
+    return data.tasks || []
+  } catch {
+    return []
+  }
+}
+
+// ─── Local fallback: IndexedDB polling (if worker is unreachable) ────────────
 
 const DB_NAME = 'todo-schedules'
 const STORE_NAME = 'tasks'
@@ -49,7 +94,7 @@ async function deleteTask(id) {
 async function markFired(id) {
   try {
     const cache = await caches.open(FIRED_CACHE)
-    await cache.put(String(id), new Response('1', { headers: { 'x-id': id } }))
+    await cache.put(String(id), new Response('1'))
   } catch {}
 }
 
@@ -104,12 +149,6 @@ function stopPolling() {
   if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
 }
 
-self.addEventListener('sync', (event) => {
-  if (event.tag === 'todo-check') {
-    event.waitUntil(checkAndNotify())
-  }
-})
-
 self.addEventListener('message', (event) => {
   if (!event.data) return
   const data = event.data
@@ -118,7 +157,6 @@ self.addEventListener('message', (event) => {
     putAllTasks(data.tasks || []).then(() => {
       checkAndNotify()
       startPolling()
-      try { self.registration.sync.register('todo-check') } catch {}
     })
   }
 
@@ -134,25 +172,16 @@ self.addEventListener('message', (event) => {
   }
 })
 
-async function registerPeriodicSync() {
-  try {
-    if (self.registration.periodicSync) {
-      await self.registration.periodicSync.register('todo-check', { minInterval: 60 * 60 * 1000 })
-    }
-  } catch {}
-}
-
-self.addEventListener('activate', (event) => {
-  event.waitUntil(clients.claim())
-  registerPeriodicSync()
-  checkAndNotify()
-  getAllTasks().then(tasks => { if (tasks.length > 0) startPolling() })
-})
-
-self.addEventListener('periodicsync', (event) => {
+self.addEventListener('sync', (event) => {
   if (event.tag === 'todo-check') {
     event.waitUntil(checkAndNotify())
   }
+})
+
+self.addEventListener('activate', (event) => {
+  event.waitUntil(clients.claim())
+  checkAndNotify()
+  getAllTasks().then(tasks => { if (tasks.length > 0) startPolling() })
 })
 
 self.addEventListener('notificationclick', (event) => {

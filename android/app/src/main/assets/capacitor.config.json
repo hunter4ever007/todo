@@ -1,0 +1,14 @@
+{
+	"appId": "com.todo.app",
+	"appName": "Todo",
+	"webDir": "dist",
+	"server": {
+		"androidScheme": "https"
+	},
+	"plugins": {
+		"LocalNotifications": {
+			"smallIcon": "ic_stat_icon_config",
+			"iconColor": "#6366f1"
+		}
+	}
+}
