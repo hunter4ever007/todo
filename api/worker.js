@@ -69,9 +69,9 @@ async function handleSubscribe(request, env) {
 
 async function handleSchedule(request, env) {
   const { task, endpoint } = await request.json()
-  if (!task || !task.id || !endpoint) return json({ error: 'missing fields' }, 400)
+  if (!task || !task.id || !endpoint || !task.target) return json({ error: 'missing fields' }, 400)
 
-  const minute = makeMinuteKey(task.date, task.time)
+  const minute = fmtMinute(new Date(task.target))
   if (!minute) return json({ error: 'invalid date/time' }, 400)
 
   await env.KV_SCHEDULES.put(`sch:${task.id}`, JSON.stringify({ task, endpoint, minute }))
@@ -125,11 +125,10 @@ async function handleDue(request, env) {
       if (!val) continue
       const { task, endpoint: ep } = JSON.parse(val)
       if (ep !== endpoint) continue
-      const target = new Date(task.date + 'T' + task.time).getTime()
-      if (Date.now() >= target - 60000) {
+      if (Date.now() >= task.target - 60000) {
         tasks.push(task)
         await env.KV_SCHEDULES.delete(`sch:${task.id}`)
-        await removeFromDueList(env, task.id, task.date, task.time)
+        await removeFromDueList(env, task.id, task.target)
       }
     }
   } while (cursor)
@@ -137,9 +136,9 @@ async function handleDue(request, env) {
   return json({ tasks })
 }
 
-async function removeFromDueList(env, id, date, time) {
-  const minute = makeMinuteKey(date, time)
-  if (!minute) return
+async function removeFromDueList(env, id, target) {
+  if (!target) return
+  const minute = fmtMinute(new Date(target))
   const raw = await env.KV_SCHEDULES.get(`due:${minute}`)
   if (!raw) return
   const ids = JSON.parse(raw).filter(x => x !== id)

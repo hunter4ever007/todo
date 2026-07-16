@@ -106,8 +106,9 @@ async function sendSubscribe() {
 
 async function sendSchedule(task) {
   if (!pushSubscription) return
+  const target = new Date(task.date + 'T' + task.time).getTime()
   await api('/api/schedule', {
-    task: { id: task.id, title: task.title, date: task.date, time: task.time },
+    task: { id: task.id, title: task.title, target },
     endpoint: pushSubscription.endpoint
   })
 }
