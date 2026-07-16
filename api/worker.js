@@ -17,11 +17,11 @@ export default {
     const path = url.pathname
 
     try {
-      if (path === '/api/init') return cors(handleInit(env))
-      if (path === '/api/subscribe' && request.method === 'POST') return cors(handleSubscribe(request, env))
-      if (path === '/api/schedule' && request.method === 'POST') return cors(handleSchedule(request, env))
-      if (path === '/api/cancel' && request.method === 'POST') return cors(handleCancel(request, env))
-      if (path === '/api/due') return cors(handleDue(request, env))
+      if (path === '/api/init') return cors(await handleInit(env))
+      if (path === '/api/subscribe' && request.method === 'POST') return cors(await handleSubscribe(request, env))
+      if (path === '/api/schedule' && request.method === 'POST') return cors(await handleSchedule(request, env))
+      if (path === '/api/cancel' && request.method === 'POST') return cors(await handleCancel(request, env))
+      if (path === '/api/due') return cors(await handleDue(request, env))
       if (path === '/api/health') return cors(json({ ok: true }))
     } catch (e) {
       return cors(json({ error: e.message }, 500))
