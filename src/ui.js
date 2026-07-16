@@ -1,8 +1,10 @@
 import { loadTasks, addTask, updateTask, toggleTask, deleteTask } from './store.js'
+import { requestPermission } from './notification.js'
 import { log } from './logger.js'
 
 let appEl
 let editId = null
+let notificationAsked = false
 
 export function init(container) {
   appEl = container
@@ -23,7 +25,7 @@ export function init(container) {
         <form id="task-form" novalidate>
           <div class="field">
             <label for="f-title">Title</label>
-            <input id="f-title" name="title" placeholder="e.g. Buy groceries" required>
+            <input id="f-title" name="title" type="text" placeholder="e.g. Buy groceries" required>
           </div>
           <div class="field">
             <label for="f-desc">Description</label>
@@ -113,6 +115,10 @@ function onFormSubmit(e) {
 }
 
 function onClick(e) {
+  if (!notificationAsked) {
+    notificationAsked = true
+    requestPermission()
+  }
   const toggle = e.target.closest('[data-toggle]')
   const del = e.target.closest('[data-delete]')
   const edit = e.target.closest('[data-edit]')
