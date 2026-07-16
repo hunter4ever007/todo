@@ -2,16 +2,13 @@ import { loadTasks } from './store.js'
 import { log } from './logger.js'
 
 const FIRED_KEY = 'todo:notified'
-const pageTimers = new Map()
-let ready = false
-let usingSW = false
 
 function getFired() {
   try { return JSON.parse(localStorage.getItem(FIRED_KEY) || '[]') }
   catch { return [] }
 }
 
-function setFired(id) {
+function markFired(id) {
   const ids = getFired()
   if (!ids.includes(id)) {
     ids.push(id)
@@ -42,9 +39,9 @@ function playBeep() {
   }
 }
 
-function notify(task) {
+function notifyPage(task) {
   playBeep()
-  setFired(task.id)
+  markFired(task.id)
   try {
     if ('Notification' in window && Notification.permission === 'granted') {
       navigator.serviceWorker?.ready?.then(reg => {
@@ -70,19 +67,26 @@ function notify(task) {
   log('INFO', 'Fired reminder for', task.id)
 }
 
-function schedulePageTimer(task) {
-  if (pageTimers.has(task.id)) clearTimeout(pageTimers.get(task.id))
-  const target = new Date(task.date + 'T' + task.time).getTime()
-  const delay = target - Date.now()
-  if (delay < -60000) return
-  if (delay < 0) { notify(task); return }
-  const id = setTimeout(() => notify(task), delay)
-  pageTimers.set(task.id, id)
+function getPendingTasks() {
+  const fired = getFired()
+  return loadTasks().filter(t => {
+    if (t.done || !t.reminder || !t.date || !t.time) return false
+    if (fired.includes(t.id)) return false
+    return true
+  })
 }
 
-function clearPageTimers() {
-  for (const [, t] of pageTimers) clearTimeout(t)
-  pageTimers.clear()
+async function syncFiredFromSW() {
+  try {
+    const reg = await navigator.serviceWorker.ready
+    const ids = await new Promise((resolve) => {
+      const channel = new MessageChannel()
+      channel.port1.onmessage = (e) => resolve(e.data?.ids || [])
+      reg.active?.postMessage({ type: 'GET_FIRED' }, [channel.port2])
+      setTimeout(() => resolve([]), 1000)
+    })
+    for (const id of ids) markFired(id)
+  } catch {}
 }
 
 async function sendToSW(tasks) {
@@ -93,27 +97,21 @@ async function sendToSW(tasks) {
   } catch { return false }
 }
 
-function getPendingTasks() {
-  const fired = getFired()
-  return loadTasks().filter(t => {
-    if (t.done || !t.reminder || !t.date || !t.time) return false
-    if (fired.includes(t.id)) return false
-    return true
-  })
-}
-
-export async function reschedule() {
-  if (!ready) return
-  clearPageTimers()
+async function refresh() {
+  await syncFiredFromSW()
   const pending = getPendingTasks()
   if (pending.length === 0) return
   const ok = await sendToSW(pending)
-  usingSW = ok
+  log('INFO', ok ? `Sent ${pending.length} reminders to SW` : 'SW unavailable')
   if (!ok) {
-    log('INFO', 'SW unavailable, using page timers')
-    for (const task of pending) schedulePageTimer(task)
-  } else {
-    log('INFO', `Scheduled ${pending.length} reminders via SW`)
+    log('INFO', 'Falling back to page timers')
+    for (const task of pending) {
+      const target = new Date(task.date + 'T' + task.time).getTime()
+      const delay = target - Date.now()
+      if (delay < -60000) continue
+      if (delay < 0) { notifyPage(task); continue }
+      setTimeout(() => notifyPage(task), delay)
+    }
   }
 }
 
@@ -124,19 +122,24 @@ export function requestPermission() {
   Notification.requestPermission().then(r => log('INFO', 'Notification permission:', r))
 }
 
+export function reschedule() {
+  refresh()
+}
+
 export function start() {
   if (!('Notification' in window)) { log('WARN', 'Notifications not supported'); return }
-  ready = true
   requestPermission()
-  reschedule()
+  refresh()
   document.addEventListener('visibilitychange', () => {
-    if (!document.hidden) { reschedule(); requestPermission() }
+    if (!document.hidden) { refresh(); requestPermission() }
   })
-  log('INFO', 'Notification scheduler started')
+  log('INFO', 'Notification scheduler started (SW polling)')
 }
 
 export function stop() {
-  clearPageTimers()
-  usingSW = false
-  ready = false
+  try {
+    navigator.serviceWorker.ready.then(reg => {
+      reg.active?.postMessage({ type: 'CLEAR_ALL' })
+    })
+  } catch {}
 }
