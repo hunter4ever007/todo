@@ -22,6 +22,7 @@ export default {
       if (path === '/api/schedule' && request.method === 'POST') return cors(await handleSchedule(request, env))
       if (path === '/api/cancel' && request.method === 'POST') return cors(await handleCancel(request, env))
       if (path === '/api/due') return cors(await handleDue(request, env))
+      if (path === '/api/clear' && request.method === 'POST') return cors(await handleClear(env))
       if (path === '/api/health') return cors(json({ ok: true }))
     } catch (e) {
       return cors(json({ error: e.message }, 500))
@@ -225,6 +226,7 @@ async function sendPushNotification(subscription, vapidKeys) {
   const res = await fetch(endpoint, {
     method: 'POST',
     headers: {
+      'Content-Type': 'application/octet-stream',
       'TTL': '86400',
       'Authorization': `WebPush ${jwt}`,
       'Crypto-Key': cryptoKey
@@ -237,6 +239,24 @@ async function sendPushNotification(subscription, vapidKeys) {
     throw new Error(`${res.status} ${res.statusText}`)
   }
   console.log('[push] success for endpoint')
+}
+
+// ─── KV: clear all push/schedule data ────────────────────────────────────────
+
+async function handleClear(env) {
+  let count = 0
+  for (const prefix of ['sub:', 'sub-rev:', 'sch:', 'due:']) {
+    let cursor
+    do {
+      const list = await env.KV_SCHEDULES.list({ prefix, cursor })
+      cursor = list.cursor
+      for (const key of list.keys) {
+        await env.KV_SCHEDULES.delete(key.name)
+        count++
+      }
+    } while (cursor)
+  }
+  return json({ ok: true, deleted: count })
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
