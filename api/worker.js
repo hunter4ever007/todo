@@ -157,6 +157,8 @@ async function processDueTasks(env) {
   const vapidKeys = await env.KV_SCHEDULES.get('vapid-keys', 'json')
   if (!vapidKeys) return
 
+  const failed = []
+
   for (const id of ids) {
     const sch = await env.KV_SCHEDULES.get(`sch:${id}`)
     if (!sch) continue
@@ -164,25 +166,27 @@ async function processDueTasks(env) {
     const { task, endpoint } = JSON.parse(sch)
     const key = `sub:${b64urlEncode(new TextEncoder().encode(endpoint))}`
     const subRaw = await env.KV_SCHEDULES.get(key)
-    if (!subRaw) continue
+    if (!subRaw) { continue }
 
     const subscription = JSON.parse(subRaw)
 
     try {
       await sendPushNotification(subscription, vapidKeys)
+      await env.KV_SCHEDULES.delete(`sch:${id}`)
     } catch (e) {
       console.error('[push] failed for', id, e.message)
       if (e.message.includes('410') || e.message.includes('404')) {
         await env.KV_SCHEDULES.delete(key)
-        await env.KV_SCHEDULES.delete(`sub-rev:${b64urlEncode(new TextEncoder().encode(endpoint))}`)
       }
-      continue
+      failed.push(id)
     }
-
-    await env.KV_SCHEDULES.delete(`sch:${id}`)
   }
 
-  await env.KV_SCHEDULES.delete(`due:${minute}`)
+  if (failed.length > 0) {
+    await env.KV_SCHEDULES.put(`due:${minute}`, JSON.stringify(failed))
+  } else {
+    await env.KV_SCHEDULES.delete(`due:${minute}`)
+  }
 }
 
 // ─── Web Push with VAPID ─────────────────────────────────────────────────────
@@ -212,7 +216,7 @@ async function sendPushNotification(subscription, vapidKeys) {
     new TextEncoder().encode(signingInput)
   )
 
-  const jwt = `${signingInput}.${b64urlEncode(sig)}`
+  const jwt = `${signingInput}.${b64urlEncode(derToRaw(new Uint8Array(sig)))}`
   const pubKeyRaw = jwkToRawPublicKeyBytes(vapidKeys.publicKey)
   const cryptoKey = `p256ecdsa=${b64urlEncode(pubKeyRaw)}`
 
@@ -233,6 +237,28 @@ async function sendPushNotification(subscription, vapidKeys) {
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
+
+function derToRaw(der) {
+  let offset = 2
+  if (der[1] & 0x80) offset += der[1] & 0x7f
+  if (der[offset] !== 0x02) throw new Error('Expected INTEGER')
+
+  let rLen = der[offset + 1]
+  let rStart = offset + 2
+  let sStart = rStart + rLen
+  if (der[sStart] !== 0x02) throw new Error('Expected INTEGER')
+  let sLen = der[sStart + 1]
+  sStart += 2
+
+  const rData = der.slice(rStart, rStart + rLen)
+  const sData = der.slice(sStart, sStart + sLen)
+  const raw = new Uint8Array(64)
+  if (rData.length <= 32) raw.set(rData, 32 - rData.length)
+  else raw.set(rData.slice(rData.length - 32), 0)
+  if (sData.length <= 32) raw.set(sData, 64 - sData.length)
+  else raw.set(sData.slice(sData.length - 32), 32)
+  return raw
+}
 
 function makeMinuteKey(date, time) {
   if (!date || !time) return null
