@@ -220,10 +220,11 @@ async function sendPushNotification(subscription, vapidKeys) {
   const pubKeyRaw = jwkToRawPublicKeyBytes(vapidKeys.publicKey)
   const cryptoKey = `p256ecdsa=${b64urlEncode(pubKeyRaw)}`
 
+  console.log('[push] sending to', endpoint.slice(0, 60) + '...')
+
   const res = await fetch(endpoint, {
     method: 'POST',
     headers: {
-      'Content-Length': '0',
       'TTL': '86400',
       'Authorization': `WebPush ${jwt}`,
       'Crypto-Key': cryptoKey
@@ -232,8 +233,10 @@ async function sendPushNotification(subscription, vapidKeys) {
 
   if (!res.ok) {
     const text = await res.text().catch(() => '')
-    throw new Error(`${res.status} ${res.statusText} — ${text}`)
+    console.error('[push] response', res.status, res.statusText, text.slice(0, 200))
+    throw new Error(`${res.status} ${res.statusText}`)
   }
+  console.log('[push] success for endpoint')
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
