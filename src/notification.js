@@ -2,8 +2,8 @@ import { loadTasks } from './store.js'
 import { log } from './logger.js'
 
 const FIRED_KEY = 'todo:notified'
-const CHECK_INTERVAL = 15000
-let checkTimer = null
+const timers = new Map()
+let ready = false
 
 function getFired() {
   try { return JSON.parse(localStorage.getItem(FIRED_KEY) || '[]') }
@@ -18,68 +18,109 @@ function markFired(id) {
   }
 }
 
-function getIconUrl() {
+function getBase() {
   const base = document.querySelector('base')?.getAttribute('href') || '/'
-  return base + 'icons/icon-192.svg'
+  return base.endsWith('/') ? base : base + '/'
 }
 
-function showNotification(task) {
-  if (!('Notification' in window)) return
-  if (Notification.permission === 'denied') return log('WARN', 'Notification denied for task', task.id)
-  if (Notification.permission === 'default') {
-    requestPermission()
-    return
-  }
+function playBeep() {
   try {
-    const n = new Notification('🔔 Todo Reminder', {
-      body: task.title,
-      tag: task.id,
-      data: { id: task.id },
-      icon: getIconUrl()
-    })
-    n.onclick = () => {
-      window.focus()
-      const el = document.querySelector(`[data-task-id="${task.id}"]`)
-      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' })
-      n.close()
+    const ctx = new (window.AudioContext || window.webkitAudioContext)()
+    const osc = ctx.createOscillator()
+    const gain = ctx.createGain()
+    osc.connect(gain)
+    gain.connect(ctx.destination)
+    osc.frequency.value = 880
+    osc.type = 'sine'
+    gain.gain.setValueAtTime(0.3, ctx.currentTime)
+    gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.6)
+    osc.start(ctx.currentTime)
+    osc.stop(ctx.currentTime + 0.6)
+  } catch (e) {
+    log('WARN', 'Beep unavailable', e)
+  }
+}
+
+function fireNow(task) {
+  playBeep()
+  markFired(task.id)
+  try {
+    if ('Notification' in window && Notification.permission === 'granted') {
+      navigator.serviceWorker?.ready?.then(reg => {
+        reg.showNotification('🔔 Todo Reminder', {
+          body: task.title,
+          tag: task.id,
+          data: { id: task.id, url: window.location.href },
+          icon: getBase() + 'icons/icon-192.svg',
+          vibrate: [200, 100, 200],
+          requireInteraction: true
+        })
+      }).catch(() => {
+        new Notification('🔔 Todo Reminder', {
+          body: task.title,
+          tag: task.id,
+          data: { id: task.id },
+          icon: getBase() + 'icons/icon-192.svg'
+        })
+      })
     }
-    log('INFO', 'Notification sent for', task.id)
   } catch (e) {
     log('ERROR', 'Notification failed', e)
   }
+  log('INFO', 'Fired reminder for', task.id)
 }
 
-function checkReminders() {
-  const tasks = loadTasks()
+function scheduleTask(task) {
+  if (task.done || !task.reminder || !task.date || !task.time) return
   const fired = getFired()
-  const now = new Date()
-  for (const task of tasks) {
-    if (task.done || !task.reminder || !task.date || !task.time) continue
-    if (fired.includes(task.id)) continue
-    const taskDate = new Date(task.date + 'T' + task.time)
-    const diff = now - taskDate
-    if (diff >= 0 && diff < CHECK_INTERVAL + 5000) {
-      showNotification(task)
-      markFired(task.id)
+  if (fired.includes(task.id)) return
+  const target = new Date(task.date + 'T' + task.time)
+  const now = Date.now()
+  const delay = target.getTime() - now
+  if (delay < -2000) {
+    if (Math.abs(delay) < 3600000) {
+      fireNow(task)
     }
+    return
+  }
+  if (timers.has(task.id)) clearTimeout(timers.get(task.id))
+  const id = setTimeout(() => fireNow(task), Math.max(delay, 0))
+  timers.set(task.id, id)
+}
+
+function scheduleAll() {
+  for (const [id, t] of timers) { clearTimeout(t) }
+  timers.clear()
+  const tasks = loadTasks()
+  for (const task of tasks) {
+    scheduleTask(task)
   }
 }
 
 export function requestPermission() {
   if (!('Notification' in window)) return
-  if (Notification.permission !== 'granted' && Notification.permission !== 'denied') {
-    Notification.requestPermission().then(result => {
-      log('INFO', 'Notification permission:', result)
-    })
-  }
+  if (Notification.permission === 'granted') return
+  if (Notification.permission === 'denied') return
+  Notification.requestPermission().then(r => log('INFO', 'Notification permission:', r))
+}
+
+export function reschedule() {
+  if (ready) scheduleAll()
 }
 
 export function start() {
-  checkReminders()
-  checkTimer = setInterval(checkReminders, CHECK_INTERVAL)
-  log('INFO', 'Notification watcher started')
+  if (!('Notification' in window)) { log('WARN', 'Notifications not supported'); return }
+  ready = true
+  requestPermission()
+  scheduleAll()
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) { scheduleAll(); requestPermission() }
+  })
+  log('INFO', 'Notification scheduler started')
 }
 
 export function stop() {
-  if (checkTimer) { clearInterval(checkTimer); checkTimer = null }
+  for (const [id, t] of timers) { clearTimeout(t) }
+  timers.clear()
+  ready = false
 }

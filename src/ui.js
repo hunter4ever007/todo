@@ -1,5 +1,5 @@
 import { loadTasks, addTask, updateTask, toggleTask, deleteTask } from './store.js'
-import { requestPermission } from './notification.js'
+import { requestPermission, reschedule } from './notification.js'
 import { log } from './logger.js'
 
 let appEl
@@ -112,6 +112,7 @@ function onFormSubmit(e) {
   }
   closeModal()
   renderList()
+  reschedule()
 }
 
 function onClick(e) {
@@ -127,8 +128,8 @@ function onClick(e) {
   const themeBtn = e.target.closest('#theme-toggle')
   const overlay = e.target.closest('.modal-overlay')
 
-  if (toggle) { toggleTask(toggle.dataset.toggle); renderList() }
-  if (del) { deleteTask(del.dataset.delete); renderList() }
+  if (toggle) { toggleTask(toggle.dataset.toggle); renderList(); reschedule() }
+  if (del) { deleteTask(del.dataset.delete); renderList(); reschedule() }
   if (themeBtn) toggleTheme()
   if (edit) {
     const tasks = loadTasks()
